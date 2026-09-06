@@ -81,6 +81,48 @@ def extract_video_id(url: str) -> str | None:
 PLAYER_CLIENTS = (None, "android", "ios", "tv")
 
 
+import os
+import tempfile
+
+_COOKIE_FILE_PATH: str | None = None
+
+
+def get_cookie_file() -> str | None:
+    """Locate or unpack a Netscape cookies.txt file for authenticated yt-dlp requests."""
+    global _COOKIE_FILE_PATH
+    if _COOKIE_FILE_PATH and Path(_COOKIE_FILE_PATH).exists():
+        return _COOKIE_FILE_PATH
+
+    # 1. Local filesystem candidates
+    for cand in [Path("cookies.txt"), Path(".streamlit/cookies.txt")]:
+        if cand.is_file() and cand.stat().st_size > 0:
+            _COOKIE_FILE_PATH = str(cand.resolve())
+            return _COOKIE_FILE_PATH
+
+    # 2. Check environment variable or Streamlit secrets
+    raw = os.environ.get("YOUTUBE_COOKIES")
+    if not raw:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "YOUTUBE_COOKIES" in st.secrets:
+                raw = str(st.secrets["YOUTUBE_COOKIES"])
+        except Exception:
+            pass
+
+    if raw and raw.strip():
+        potential_path = Path(raw.strip())
+        if potential_path.is_file():
+            _COOKIE_FILE_PATH = str(potential_path.resolve())
+            return _COOKIE_FILE_PATH
+
+        tmp = Path(tempfile.gettempdir()) / "omniclip_yt_cookies.txt"
+        tmp.write_text(raw.strip(), encoding="utf-8")
+        _COOKIE_FILE_PATH = str(tmp.resolve())
+        return _COOKIE_FILE_PATH
+
+    return None
+
+
 def ydl_options(client: str | None, **extra) -> dict:
     options = {
         "quiet": True,
@@ -91,6 +133,10 @@ def ydl_options(client: str | None, **extra) -> dict:
     }
     if client:
         options["extractor_args"] = {"youtube": {"player_client": [client]}}
+
+    cookie_file = get_cookie_file()
+    if cookie_file:
+        options["cookiefile"] = cookie_file
 
     # yt-dlp needs ffmpeg to merge streams or cut a partial download, and ours
     # ships inside the virtualenv rather than on PATH.
