@@ -1,11 +1,25 @@
 """OmniClip AI Content Studio - Streamlit Cloud Entrypoint."""
 import os
 import sys
+from pathlib import Path
 
 # Ensure repository root is in sys.path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from omniclip.frontend.app import main
+import streamlit as st
+from omniclip.frontend import theme
+import omniclip.frontend.app as studio_app
 
-if __name__ == "__main__":
-    main()
+# Set page config
+try:
+    st.set_page_config(page_title="OmniClip AI Studio", page_icon="🎬", layout="wide")
+except Exception:
+    pass
+
+# Always inject the theme CSS stylesheet on every frame
+theme.apply()
+
+# Run application
+studio_app.main()

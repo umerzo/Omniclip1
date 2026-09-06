@@ -786,6 +786,7 @@ PAGES = {
 
 
 def main() -> None:
+    theme.apply()
     tally = q.counts()
 
     with st.sidebar:

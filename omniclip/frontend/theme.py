@@ -503,8 +503,16 @@ CSS = """
 
 
 def apply() -> None:
-    """Install the stylesheet. Safe to call on every rerun."""
-    st.markdown(CSS.format(**TOKENS), unsafe_allow_html=True)
+    """Install the stylesheet into modern Streamlit st.html and legacy st.markdown."""
+    css_content = CSS.format(**TOKENS)
+    try:
+        st.html(css_content)
+    except Exception:
+        pass
+    try:
+        st.markdown(css_content, unsafe_allow_html=True)
+    except Exception:
+        pass
 
 
 def head(title: str, subtitle: str = "") -> None:
