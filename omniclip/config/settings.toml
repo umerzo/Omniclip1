@@ -1,0 +1,137 @@
+# OmniClip configuration.
+# Secrets belong in environment variables, not here. Any value written as
+# "${ENV_VAR}" is resolved from the environment at load time.
+
+[ingest]
+# Preferred transcript languages, in order. Falls back to any available track.
+languages = ["en", "ur", "hi"]
+# Where downloaded/derived source material is cached.
+cache_dir = "assets/cache"
+
+# Used only when a video ships no captions (common for Shorts): the audio is
+# downloaded and transcribed. Groq hosts Whisper; the script model does not,
+# so transcription keeps its own endpoint.
+whisper_base_url = "https://api.groq.com/openai/v1"
+whisper_api_key = "${GROQ_API_KEY}"
+whisper_model = "whisper-large-v3"
+
+[script]
+# Any OpenAI-compatible endpoint works; swap base_url + model to change provider.
+#   Gemini     -> https://generativelanguage.googleapis.com/v1beta/openai/
+#   Groq       -> https://api.groq.com/openai/v1  (8k tokens/min on free tier)
+#   freellmapi -> http://localhost:3001/v1  with model = "auto"
+# OpenRouter is primary. Measured against the alternatives: it described all 14
+# shots of a two-minute video in one 10-second request, where Groq's 8000
+# tokens/minute forced the same work into 9 minutes of paced calls.
+base_url = "https://openrouter.ai/api/v1"
+api_key = "${OPENROUTER_API_KEY}"
+model = "minimax/minimax-m3:free"
+temperature = 0.8
+
+max_completion_tokens = 8000
+reasoning_effort = ""
+
+max_retries = 4
+
+# Speech pacing used to convert word counts <-> durations.
+default_wpm = 145
+
+# Groq is the fallback for scripting: slower per call because of its 8000
+# tokens/minute ceiling, but reliable. Gemini is deliberately not in the chain
+# — its 20-requests-per-day free tier cannot finish a video, and having it here
+# only replaced real errors with misleading quota messages from it.
+[script.fallback]
+base_url = "https://api.groq.com/openai/v1"
+api_key = "${GROQ_API_KEY}"
+model = "openai/gpt-oss-120b"
+max_completion_tokens = 4000
+
+[video]
+# Output frame. "9:16" for Shorts/Reels, "16:9" for widescreen.
+# Generation sizes are what Agnes accepts; the compositor scales and centre-
+# crops whatever a provider returns into the output frame.
+aspect_ratio = "16:9"
+fps = 30
+
+[video.frames]
+"9:16" = { width = 1080, height = 1920, gen_width = 768, gen_height = 1152 }
+"16:9" = { width = 1920, height = 1080, gen_width = 1280, gen_height = 720 }
+"1:1"  = { width = 1080, height = 1080, gen_width = 960,  gen_height = 960 }
+
+[visuals]
+# Provide additional keys as AGNES_API_KEY_2, AGNES_API_KEY_3, ...
+# Agnes video models, newest last. 2.5 takes "seconds" as a string and supports
+# image-to-video; v2.0 takes explicit frame counts.
+agnes_model = "agnes-video-v2.0"
+pexels_api_key = "${PEXELS_API_KEY}"
+# Second stock library. A query that finds nothing usable in one often has
+# something in the other, so the chain falls through instead of failing.
+pixabay_api_key = "${PIXABAY_API_KEY}"
+# Whether a scene may fall back to a stock library when generation cannot
+# supply it. On means a spent quota costs a shot's quality; off means it costs
+# the whole run. Both the CLI and the queue page read this one value -- they
+# used to carry their own opposite defaults, so the same job behaved
+# differently depending on which one started it.
+#   --no-stock / the page's toggle still override it per run.
+allow_stock = true
+# Music is billed per generated clip (~$0.045 for ~29s), so a bed is built from
+# a small set that is cached per mood and looped, instead of buying enough
+# clips to cover the runtime. Cost stops scaling with video length.
+music_pieces = 3
+
+[queue]
+# Agnes allows ONE video generation per minute PER KEY — the quota is not
+# pooled, and its "16 req/min" figure applies to chat/image, not video. So
+# throughput is (number of keys) clips per minute; add keys to go faster.
+requests_per_minute = 1
+# Measured ceiling for the whole pool from one machine, regardless of key
+# count. Submitting faster than this gets 429s that eventually fail a scene.
+pool_requests_per_minute = 1.0
+
+[tts]
+voice = "en-US-AndrewNeural"
+rate = "+0%"
+volume = "+0%"
+
+[shots]
+# Every run analyses the source's cuts so the rebuild follows its layout.
+# Detection is deliberately sensitive; the merge step decides what matters.
+scene_threshold = 0.08
+# Detections closer than this are one cut seen on consecutive frames.
+cluster_window = 0.4
+# Floor for a shot. The ceiling and the split point are derived per video
+# from its length, so they are not settings.
+min_shot_seconds = 3.0
+# How many scenes a video is worth. This is a budget, not a technical limit:
+# one scene is one clip generation, and generation is capped at roughly one
+# submission per minute for the whole pool, so 40 scenes is about an hour of
+# waiting. Longer sources get longer scenes rather than more of them -- until
+# the clip ceiling is reached, past which the count grows and the run gets
+# expensive. The estimate reported after shot analysis says when that happens.
+scene_cap = 40
+# Longest a single scene may run. One generation covers about nineteen seconds,
+# and past that a scene is built by continuing one clip into the next from its
+# final frame. Raising this lets a slow piece hold a shot instead of cutting;
+# it costs another generation per extra nineteen seconds, and on a source that
+# cuts very slowly it also means fewer, longer scenes. Chaining tops out at
+# three clips, roughly a minute.
+max_scene_seconds = 19.0
+# Vision runs on the [script] endpoint.
+#
+# Measured, not assumed: this model took 14 frames in one 10-second request for
+# 1787 prompt tokens. Groq's vision capped at 2 frames and needed 30s between
+# calls to stay inside 8000 tokens/minute, turning the same job into 9 minutes.
+#
+# The fallback is a second model on the SAME endpoint. "openrouter/free" is an
+# auto-router across free models, so it stays up when one model is limited.
+# It is deliberately not the primary: the router serves a different model each
+# call, and inconsistent phrasing between batches undoes character locking.
+vision_model = "minimax/minimax-m3:free"
+vision_batch_size = 14
+vision_max_tokens = 6000
+vision_min_interval = 3.0
+vision_frame_width = 384
+fallback_vision_model = "openrouter/free"
+
+[output]
+dir = "output"

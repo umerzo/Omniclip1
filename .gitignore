@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+output/
+assets/cache/
+bin/
+scratch/
+*.log
+*.pid
+*.mp4
+*.m4a
+*.mp3
+*.jpg
+*.jpeg
+*.png
+*.webp
