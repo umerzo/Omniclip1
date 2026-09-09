@@ -50,8 +50,10 @@ def is_running() -> bool:
     alive = False
     try:
         if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                                    capture_output=True, text=True)
+                                    capture_output=True, text=True,
+                                    creationflags=creationflags)
             out_str = (result.stdout or "").lower()
             alive = "no tasks" not in out_str and any(part == str(pid) for part in (result.stdout or "").split())
         else:
@@ -76,9 +78,18 @@ def ensure_running() -> bool:
     log = (root / WORKER_LOG).open("a", encoding="utf-8", errors="replace")
     log.write(f"\n=== supervisor started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
     log.flush()
-    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    if getattr(sys, "frozen", False):
+        worker_cmd = [sys.executable, "--worker"]
+    else:
+        worker_cmd = [runner.python_exe(), "-u", "-m", "omniclip.frontend.worker"]
     process = subprocess.Popen(
-        [runner.python_exe(), "-u", "-m", "omniclip.frontend.worker"],
+        worker_cmd,
         cwd=str(PROJECT_ROOT), stdout=log, stderr=subprocess.STDOUT,
         creationflags=creationflags, start_new_session=(os.name != "nt"),
     )
@@ -96,8 +107,9 @@ def stop() -> bool:
         return False
     try:
         if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True)
+                           capture_output=True, creationflags=creationflags)
         else:
             os.kill(pid, 15)
     except (OSError, subprocess.SubprocessError):

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -68,6 +70,7 @@ class Shot:
     start: float
     duration: float
     description: str = ""
+    donor_frame: str = ""
 
     @property
     def end(self) -> float:
@@ -186,10 +189,12 @@ def find_cuts(video: str | Path, threshold: float = 0.08,
     output triples the apparent shot count. Detections closer together than
     `cluster_window` are collapsed into the strongest of the group.
     """
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     proc = subprocess.run(
         [ffmpeg_exe(), "-hide_banner", "-i", str(video), "-filter:v",
          f"select='gt(scene,{threshold})',metadata=print", "-f", "null", "-"],
         capture_output=True, text=True,
+        creationflags=creationflags,
     )
     stderr = proc.stderr or ""
     times = [float(t) for t in _PTS.findall(stderr)]
@@ -310,15 +315,41 @@ def subdivide(shots: list[Shot], split_after: float = 0.0) -> list[Shot]:
 
 def _frame_data_url(video: Path, at: float, width: int = 448) -> str:
     """Grab one frame and encode it for the vision model."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     proc = subprocess.run(
         [ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
          "-ss", f"{at:.3f}", "-i", str(video), "-frames:v", "1",
          "-vf", f"scale={width}:-1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
         capture_output=True,
+        creationflags=creationflags,
     )
     if proc.returncode != 0 or not proc.stdout:
         raise ShotError(f"Could not read a frame at {at:.1f}s from {video.name}")
     return "data:image/jpeg;base64," + base64.b64encode(proc.stdout).decode()
+
+
+def extract_donor_frames(video: Path, shots: list[Shot], output_dir: Path) -> None:
+    """Extract pristine full-resolution keyframe for each shot from donor video."""
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        exe = ffmpeg_exe()
+        for s in shots:
+            out_path = output_dir / f"shot_{s.index:04d}.jpg"
+            if not out_path.exists():
+                mid = s.start + (s.duration / 2.0)
+                cmd = [
+                    str(exe), "-y", "-ss", f"{mid:.3f}", "-i", str(video),
+                    "-frames:v", "1", "-q:v", "2", str(out_path)
+                ]
+                try:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+                except Exception:
+                    pass
+            if out_path.exists():
+                s.donor_frame = str(out_path)
+    except Exception as exc:
+        print(f"Notice: extract_donor_frames: {exc}", flush=True)
 
 
 # Agnes accepts ~1500-character prompts (measured). The style phrase is
@@ -690,12 +721,12 @@ def analyse(
     split_after: float = 0.0,
     max_duration: float | None = None,
     start_seconds: float = 0.0,
-    scene_cap: int = 40,
+    scene_cap: int = 0,
     max_clip_seconds: float = 19.0,
     batch_size: int = 2,
     max_tokens: int = 2000,
     min_interval: float = 30.0,
-    frame_width: int = 384,
+    frame_width: int = 320,
     fallback: dict | None = None,
     progress=None,
     refresh: bool = False,
@@ -726,7 +757,7 @@ def analyse(
 
         target = target_scene_seconds(probe_duration(video), scene_cap,
                                       native, max_clip_seconds)
-        min_shot_seconds = max(1.5, min(min_shot_seconds, target * 0.8))
+        min_shot_seconds = max(1.5, min(min_shot_seconds, target * 0.8)) if scene_cap > 0 else max(1.5, native * 0.8 if native > 0 else 1.5)
         max_shot_seconds = min(max_clip_seconds, target * 1.6)
         split_after = min(max_clip_seconds, target * 1.8)
 
@@ -745,6 +776,8 @@ def analyse(
         cached = json.loads(store.read_text(encoding="utf-8"))
         if cached.get("signature") == signature:
             shots = [Shot(**entry) for entry in cached["shots"]]
+            frames_dir = video.parent / "donor_frames"
+            extract_donor_frames(video, shots, frames_dir)
             return shots, cached["style"], video
 
     shots = detect_shots(video, threshold, min_shot_seconds,
@@ -768,12 +801,25 @@ def analyse(
     if not shots:
         raise ShotError("Shot analysis produced nothing to rebuild")
 
-    store.write_text(
-        json.dumps(
-            {"style": style, "cast": cast, "signature": signature,
-             "shots": [asdict(s) for s in shots]},
-            indent=2, ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    # Persist vision AI analysis immediately so network/API work is never lost
+    def _save_cache() -> None:
+        try:
+            store.write_text(
+                json.dumps(
+                    {"style": style, "cast": cast, "signature": signature,
+                     "shots": [asdict(s) for s in shots]},
+                    indent=2, ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as err:
+            print(f"Notice: failed to cache shots.json: {err}", flush=True)
+
+    _save_cache()
+
+    # Extract full-resolution donor keyframes for every shot
+    frames_dir = video.parent / "donor_frames"
+    extract_donor_frames(video, shots, frames_dir)
+    _save_cache()
+
     return shots, style, video

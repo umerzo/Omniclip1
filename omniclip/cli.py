@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         job.save()
         print(f"locked scenes {_scene_list(args.lock)}")
 
-    workers = args.workers or max(1, len(agnes_keys())) or 4
+    workers = args.workers or min(max(1, len(agnes_keys())), 6)
     repair = _scene_list(args.repair)
 
     print(f"source : {args.url}")

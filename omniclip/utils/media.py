@@ -60,10 +60,12 @@ def ffmpeg_dir() -> str:
 
 def run(args: list[str], label: str = "ffmpeg") -> subprocess.CompletedProcess:
     """Run ffmpeg, raising with the tail of its log if it fails."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     proc = subprocess.run(
         [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *args],
         capture_output=True,
         text=True,
+        creationflags=creationflags,
     )
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-6:]
@@ -73,10 +75,12 @@ def run(args: list[str], label: str = "ffmpeg") -> subprocess.CompletedProcess:
 
 def probe_duration(path: str | Path) -> float:
     """Real duration of a media file in seconds."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     proc = subprocess.run(
         [ffmpeg_exe(), "-hide_banner", "-i", str(path)],
         capture_output=True,
         text=True,
+        creationflags=creationflags,
     )
     match = _DURATION.search(proc.stderr or "")
     if not match:

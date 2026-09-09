@@ -324,7 +324,7 @@ def render_key_pool_telemetry() -> None:
         f'<div style="display:flex; justify-content:space-between; align-items:center;">'
         f'<div><span style="color:#63B98D; font-size:0.8rem; font-weight:700;">🟢 MULTI-KEY POOL READY</span>'
         f'<div style="color:#98A1AE; font-size:0.75rem; margin-top:2px;">{count} Agnes AI Keys Active · LRU Cooldown Protection</div></div>'
-        f'<div style="text-align:right;"><span style="color:#D8A24A; font-weight:700; font-size:0.9rem;">{count} Workers</span>'
+        f'<div style="text-align:right;"><span style="color:#D8A24A; font-weight:700; font-size:0.9rem;">{min(count, 6)} Paced Workers</span>'
         f'<div style="color:#6B7482; font-size:0.7rem;">Stock Fallback: Pexels + Pixabay</div></div>'
         f'</div>'
         f'</div>'

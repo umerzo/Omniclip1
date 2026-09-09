@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 try:
@@ -26,7 +27,7 @@ class ConfigError(RuntimeError):
     """Raised when configuration is missing or malformed."""
 
 
-def load_env(path: str | Path = DEFAULT_ENV) -> None:
+def load_env(path: str | Path | None = None) -> None:
     """Load KEY=VALUE lines from .env or Streamlit Cloud secrets without overwriting real env vars."""
     try:
         import streamlit as st
@@ -37,15 +38,34 @@ def load_env(path: str | Path = DEFAULT_ENV) -> None:
     except Exception:
         pass
 
-    path = Path(path)
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    if path is not None:
+        candidates = [Path(path)]
+    else:
+        appdata_env = Path(os.environ.get("APPDATA", "~")).expanduser() / "OmniClip" / ".env"
+        exe_env = Path(sys.executable).parent / ".env" if getattr(sys, "frozen", False) else None
+        cwd_env = Path.cwd() / ".env"
+        candidates = [DEFAULT_ENV, appdata_env, cwd_env]
+        if exe_env:
+            candidates.append(exe_env)
+
+    seen = set()
+    for cand in candidates:
+        try:
+            cand = cand.resolve()
+        except Exception:
+            pass
+        if cand in seen or not cand.exists():
             continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        seen.add(cand)
+        try:
+            for line in cand.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        except Exception:
+            pass
 
 
 def _resolve(value):
@@ -71,6 +91,10 @@ def load_settings(path: str | Path = DEFAULT_SETTINGS) -> dict:
 
 
 def resolve_path(value: str | Path) -> Path:
-    """Turn a config path into an absolute one, relative to the project root."""
+    """Turn a config path into an absolute one, relative to the project root or exe."""
     path = Path(value)
-    return path if path.is_absolute() else PROJECT_ROOT / path
+    if path.is_absolute():
+        return path
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent / path
+    return PROJECT_ROOT / path

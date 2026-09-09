@@ -25,7 +25,7 @@ whisper_model = "whisper-large-v3"
 # tokens/minute forced the same work into 9 minutes of paced calls.
 base_url = "https://openrouter.ai/api/v1"
 api_key = "${OPENROUTER_API_KEY}"
-model = "minimax/minimax-m3:free"
+model = "minimax/minimax-m3"
 temperature = 0.8
 
 max_completion_tokens = 8000
@@ -55,13 +55,12 @@ fps = 30
 
 [video.frames]
 "9:16" = { width = 1080, height = 1920, gen_width = 768, gen_height = 1152 }
-"16:9" = { width = 1920, height = 1080, gen_width = 1280, gen_height = 720 }
+"16:9" = { width = 1920, height = 1080, gen_width = 1280, gen_height = 704 }
 "1:1"  = { width = 1080, height = 1080, gen_width = 960,  gen_height = 960 }
 
 [visuals]
 # Provide additional keys as AGNES_API_KEY_2, AGNES_API_KEY_3, ...
-# Agnes video models, newest last. 2.5 takes "seconds" as a string and supports
-# image-to-video; v2.0 takes explicit frame counts.
+# Agnes video models: agnes-video-v2.0 (Default 720p/1080p), agnes-video-2.5-flash (Fast Fallback).
 agnes_model = "agnes-video-v2.0"
 pexels_api_key = "${PEXELS_API_KEY}"
 # Second stock library. A query that finds nothing usable in one often has
@@ -107,8 +106,8 @@ min_shot_seconds = 3.0
 # submission per minute for the whole pool, so 40 scenes is about an hour of
 # waiting. Longer sources get longer scenes rather than more of them -- until
 # the clip ceiling is reached, past which the count grows and the run gets
-# expensive. The estimate reported after shot analysis says when that happens.
-scene_cap = 40
+# 0 means unlimited 1:1 natural cuts matching the source video exactly, whether 30s or 1 hour.
+scene_cap = 0
 # Longest a single scene may run. One generation covers about nineteen seconds,
 # and past that a scene is built by continuing one clip into the next from its
 # final frame. Raising this lets a slow piece hold a shot instead of cutting;
@@ -126,12 +125,12 @@ max_scene_seconds = 19.0
 # auto-router across free models, so it stays up when one model is limited.
 # It is deliberately not the primary: the router serves a different model each
 # call, and inconsistent phrasing between batches undoes character locking.
-vision_model = "minimax/minimax-m3:free"
+vision_model = "minimax/minimax-m3"
 vision_batch_size = 14
 vision_max_tokens = 6000
 vision_min_interval = 3.0
-vision_frame_width = 384
-fallback_vision_model = "openrouter/free"
+vision_frame_width = 320
+fallback_vision_model = "google/gemini-2.5-flash"
 
 [output]
 dir = "output"

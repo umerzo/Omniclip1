@@ -119,14 +119,18 @@ SOURCE CONTENT DNA:
 - Narrative Framework: {dna.narrative_structure.get('framework', 'Escalation')}
 - Things to Avoid: {', '.join(dna.things_to_avoid) if dna.things_to_avoid else 'AI slop, static shots'}
 
+DONOR DIALOGUE & TRANSCRIPT (ORIGINAL NARRATIVE & PREMISE):
+{source_transcript[:2500] if source_transcript else 'No spoken transcript available (instrumental / ambient / original concept)'}
+
 USER SPECIFIC INPUTS:
 - User Idea / Topic: {user_idea or ('Rebuild and elevate the source video with the same characters and story' if is_remake else 'Original concept')}
 - User Instructions: {user_instructions or 'Maximize visual production value and preserve character continuity'}
 - Target Platform: {target_platform or classification.format}
 
 TASK:
-1. Define WHAT TO PRESERVE ({"The exact characters (" + ", ".join(c.get('id', c.get('name', '')) for c in (cast or [])) + "), setting, and comedic story beats" if is_remake and cast else "The structural pacing, curiosity hooks, visual rhythm"}).
-2. Define WHAT TO ELEVATE / CHANGE (enhanced cinematography, dynamic camera movement, crisp textures).
+1. Ground the core narrative from the very beginning (establish the premise, dilemma, or paradox clearly without jumping in from halfway).
+2. Define WHAT TO PRESERVE ({"The exact characters (" + ", ".join(c.get('id', c.get('name', '')) for c in (cast or [])) + "), setting, and comedic story beats" if is_remake and cast else "The structural pacing, curiosity hooks, visual rhythm"}).
+3. Define WHAT TO ELEVATE / CHANGE (enhanced cinematography, dynamic camera movement, crisp textures, natural human dialogue).
 3. Create the Creative Strategy JSON:
 {{
   "creative_strategy": {{

@@ -159,7 +159,7 @@ Output a JSON object with:
             res = self.router.run_prompt(
                 prompt=prompt,
                 system=system,
-                high_reasoning=True,
+                high_reasoning=False,
                 response_json=True,
             )
             if isinstance(res, dict):

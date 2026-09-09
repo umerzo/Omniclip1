@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import math
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -49,16 +50,25 @@ class QuotaExhausted(VisualError):
     """
 
 
-# A rejection naming the plan or the allowance is about entitlement, not pace.
-QUOTA_MARKERS = (
-    "free user", "upgrade", "token plan", "quota", "insufficient",
-    "billing", "credit", "subscribe", "plan to unlock",
+# Rejections indicating true account exhaustion or invalid credential (not temporary rate throttles)
+PERMANENT_QUOTA_MARKERS = (
+    "insufficient_user_quota", "用户额度不足", "insufficient quota",
+    "account suspended", "invalid api key", "balance exhausted",
 )
 
 
-def is_quota_message(text: str) -> bool:
+def is_permanent_quota(status_code: int, text: str) -> bool:
+    """True ONLY if the key cannot generate anymore (HTTP 401/403 or zero-balance)."""
+    if status_code in (401, 403):
+        return True
     lowered = (text or "").lower()
-    return any(marker in lowered for marker in QUOTA_MARKERS)
+    return any(marker in lowered for marker in PERMANENT_QUOTA_MARKERS)
+
+
+def is_quota_message(text: str) -> bool:
+    """Legacy helper maintained for compatibility with other callers."""
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in PERMANENT_QUOTA_MARKERS)
 
 
 @dataclass
@@ -278,6 +288,12 @@ class GlobalLimiter:
                 delay = self._next - now
             time.sleep(min(delay, 5.0))
 
+    def throttle(self, delay_seconds: float = 65.0) -> None:
+        """Global circuit breaker: pause all workers on an IP-level 429 throttle."""
+        with self._lock:
+            now = time.monotonic()
+            self._next = max(self._next, now + delay_seconds)
+
 
 class KeyRing:
     """Hands out Agnes keys subject to a per-key cooldown.
@@ -328,6 +344,12 @@ class KeyRing:
                 f"({reasons}). Waiting will not clear it; the plans have to "
                 f"reset or be upgraded.")
 
+    def cooldown_key(self, key: str, seconds: float = 65.0) -> None:
+        """Place a key on temporary cooldown without retiring it."""
+        with self._lock:
+            if key in self._free_at:
+                self._free_at[key] = max(self._free_at[key], time.monotonic() + seconds)
+
     def retire(self, key: str, reason: str) -> int:
         """Take a spent key out of the rotation; returns how many are left."""
         with self._lock:
@@ -337,7 +359,8 @@ class KeyRing:
 
     def acquire(self, timeout: float = 900.0) -> str:
         """Block until a live key is off cooldown, then reserve it."""
-        deadline = time.monotonic() + timeout
+        effective_timeout = max(timeout, len(self.keys) * 80.0)
+        deadline = time.monotonic() + effective_timeout
         while True:
             with self._lock:
                 live = self._live()
@@ -352,18 +375,21 @@ class KeyRing:
                 wait = ready - now
             if time.monotonic() + wait > deadline:
                 raise VisualError(
-                    f"agnes: no key free within {timeout:.0f}s "
+                    f"agnes: no key free within {effective_timeout:.0f}s "
                     f"({len(live)} live keys, {self.cooldown:.0f}s cooldown each)"
                 )
             time.sleep(min(wait, 5.0))
 
     def peek_ready(self) -> str:
-        """A live key for a non-generating call, ignoring cooldown."""
+        """A live key for a non-generating call, ignoring cooldown (round-robin)."""
         with self._lock:
             live = self._live()
             if not live:
                 raise QuotaExhausted(self.spent_message())
-            return live[0]
+            self._peek_idx = (getattr(self, "_peek_idx", 0) + 1) % len(live)
+            return live[self._peek_idx]
+
+
 
 
 class AgnesProvider:
@@ -377,10 +403,10 @@ class AgnesProvider:
     name = "agnes"
     BASE_URL = "https://apihub.agnes-ai.com/v1"
     POLL_URL = "https://apihub.agnes-ai.com/agnesapi"
-    # The model that has always been available. A refused choice falls back to
-    # this rather than failing the scene, because a model the account may not
-    # use is a different problem from an account that cannot generate.
-    FALLBACK_MODEL = "agnes-video-v2.0"
+    # agnes-video-v2.0 is the reliable default model (custom 64-multiple dimensions, negative prompts).
+    # agnes-video-2.5-flash is the modern fast fallback (fixed 720P, reference image control).
+    DEFAULT_MODEL = "agnes-video-v2.0"
+    FALLBACK_MODEL = "agnes-video-2.5-flash"
     MAX_CLIP_SECONDS = 20
     FRAME_RATE = 24
     # Verified by submitting increasing lengths: 1500 characters is accepted.
@@ -389,20 +415,22 @@ class AgnesProvider:
     MAX_PROMPT_CHARS = 1500
     # The service applies a generic negative prompt of its own; this replaces it
     # with one aimed at what actually went wrong: the same character rendered
-    # several times in a frame, and melted faces.
+    # several times in a frame, melted faces, and animal/human morphing.
     NEGATIVE_PROMPT = (
         "duplicate person, cloned figures, the same character repeated, "
         "twins, multiple heads, extra limbs, extra arms, extra legs, "
         "deformed face, distorted face, melted features, disfigured, "
-        "mutated hands, blurry, text, watermark, signature"
+        "mutated hands, blurry, text, watermark, signature, "
+        "animal human hybrid, species morphing, body transformation, "
+        "extra sticks, multiple walking sticks, rubber limbs, stretched body"
     )
 
     def __init__(
         self,
         api_key: str | list[str] = "",
         model: str = "agnes-video-v2.0",
-        width: int = 768,
-        height: int = 1152,
+        width: int = 1280,
+        height: int = 704,
         rpm: float = 15,
         poll_interval: float = 15.0,
         timeout: float = 900.0,
@@ -415,7 +443,7 @@ class AgnesProvider:
         # the service actually accepts.
         self.keys = KeyRing(keys, cooldown=60.0 / max(rpm, 0.1) + 2.0)
         self.gate = GlobalLimiter(pool_rpm)
-        self.model = model
+        self.model = model or self.DEFAULT_MODEL
         self.width = width
         self.height = height
         self.poll_interval = poll_interval
@@ -540,7 +568,10 @@ class AgnesProvider:
             )
             if response.status_code < 400:
                 break
-            if is_quota_message(response.text):
+            if response.status_code == 429:
+                time.sleep(3.0)
+                continue
+            if is_permanent_quota(response.status_code, response.text):
                 self._retire_key(
                     key, f"{response.status_code}: {response.text[:160]}")
                 continue
@@ -601,7 +632,7 @@ class AgnesProvider:
         each = min(self.MAX_CLIP_SECONDS, seconds / parts)
         covered = each * parts
         prompt = self._fit_prompt(query)
-        joined = cache_dir / _cache_name(self.name, prompt, int(seconds * 100),
+        joined = cache_dir / _cache_name(self.name, self.model, prompt, int(seconds * 100),
                                          variant, "chain")
         joined = joined.with_suffix(".mp4")
         if joined.exists():
@@ -637,6 +668,52 @@ class AgnesProvider:
         return VisualAsset(joined, self.name, query, self.width, self.height,
                            each * len(segments))
 
+    def _build_payload(
+        self,
+        model: str,
+        prompt: str,
+        min_duration: float,
+        frames: int,
+        reference: str | None,
+    ) -> dict[str, Any]:
+        """Build model-specific payload respecting strict API schemas."""
+        if str(model).startswith("agnes-video-2.5"):
+            # 2.5 Flash schema: fixed size, aspect_ratio, seconds, no negative_prompt, images array
+            is_portrait = self.height > self.width
+            aspect = "9:16" if is_portrait else "16:9"
+            secs = str(int(min(12, max(4, round(min_duration)))))
+            valid_http_ref = bool(
+                reference and (reference.startswith("http://") or reference.startswith("https://"))
+            )
+            body: dict[str, Any] = {
+                "model": model,
+                "prompt": f"{prompt}, sharp focus, pristine details, cinematic smooth motion",
+                "mode": "reference" if valid_http_ref else "text",
+                "size": "720P",
+                "aspect_ratio": aspect,
+                "seconds": secs,
+            }
+            if valid_http_ref:
+                body["images"] = [reference]
+            return body
+
+        # agnes-video-v2.0 schema: 64-multiples width/height, num_frames (8n+1), negative_prompt, ti2vid
+        w = max(64, (self.width // 64) * 64)
+        h = max(64, (self.height // 64) * 64)
+        body = {
+            "model": model,
+            "prompt": prompt,
+            "negative_prompt": self.NEGATIVE_PROMPT,
+            "width": w,
+            "height": h,
+            "num_frames": frames,
+            "frame_rate": self.FRAME_RATE,
+        }
+        if reference:
+            body["image"] = reference
+            body["mode"] = "ti2vid"
+        return body
+
     def fetch(self, query: str, min_duration: float, cache_dir: Path,
               variant: int = 0, reference: str | None = None,
               _segment: bool = False) -> VisualAsset | None:
@@ -651,34 +728,17 @@ class AgnesProvider:
                                      reference)
         frames = self._frames_for(min_duration)
         prompt = self._fit_prompt(query)
-        # Key on what was actually submitted, plus the variant, so trimmed
-        # duplicates share a file and repeated scenes do not.
-        path = cache_dir / _cache_name(self.name, prompt, frames, variant,
+        active_model = self.model
+
+        # Key on what was actually submitted, plus the model, so trimmed
+        # duplicates share a file and model switches don't collide.
+        path = cache_dir / _cache_name(self.name, active_model, prompt, frames, variant,
                                        "ref" if reference else "txt")
         if path.exists():
             return VisualAsset(path, self.name, query, self.width, self.height,
                                frames / self.FRAME_RATE)
 
-        body = {
-            "model": self.model,
-            "prompt": prompt,
-            "width": self.width,
-            "height": self.height,
-            "num_frames": frames,
-            "frame_rate": self.FRAME_RATE,
-            "negative_prompt": self.NEGATIVE_PROMPT,
-        }
-        if reference:
-            # "ti2vid" is the mode name the service expects; anything else is
-            # accepted and then silently ignored, which is how an earlier
-            # attempt at this appeared to work while doing nothing.
-            body["image"] = reference
-            body["mode"] = "ti2vid"
-
-        # 429 is our quota; 5xx is Agnes's own capacity ("no available server").
-        # Both are temporary and both are worth waiting out on another key,
-        # because the alternative is losing the scene entirely.
-        # Every key is spent. Nothing here will change it.
+        # 429 is rate limit; 5xx is capacity ("no available server").
         if self._exhausted.is_set():
             raise QuotaExhausted(self._exhausted_detail)
 
@@ -686,18 +746,17 @@ class AgnesProvider:
         response = None
         last_detail = "no attempt made"
         delay = 15.0
-        # A while loop rather than `for attempt in range(...)`, because finding
-        # a key spent is not a failed attempt -- the submission never happened.
-        # Charging it one would let a handful of dead keys use up the retries
-        # the live keys still need. Retirement is permanent and the ring itself
-        # raises once empty, so the extra passes are bounded by the key count.
         attempt = 0
+        active_model = self.model
+
         while attempt < self.submit_attempts:
             key = self._acquire_key()
             headers = {"Authorization": f"Bearer {key}"}
             self.gate.wait()
             if self._exhausted.is_set():
                 raise QuotaExhausted(self._exhausted_detail)
+
+            body = self._build_payload(active_model, prompt, min_duration, frames, reference)
             try:
                 response = httpx.post(
                     f"{self.BASE_URL}/videos", headers=headers, json=body, timeout=90
@@ -710,33 +769,32 @@ class AgnesProvider:
                     break
                 last_detail = f"{response.status_code}: {response.text[:160]}"
 
-                # A refusal might be about this model rather than the key.
-                # Try the model that is always allowed before deciding.
-                refused = (is_quota_message(response.text)
-                           or 400 <= response.status_code < 500)
-                if refused and body.get("model") != self.FALLBACK_MODEL:
-                    with self._model_lock:
-                        print(f"   model refused, falling back to the standard "
-                              f"model", flush=True)
-                    body["model"] = self.FALLBACK_MODEL
-                    attempt += 1
-                    continue
-
-                # Refused on the fallback too, so it is the key and not the
-                # model. Keys are separate accounts, so this one is finished
-                # while the rest are untouched: retire it and submit again on
-                # the next. _acquire_key ends the run when none are left.
-                if is_quota_message(response.text):
+                # 1. Genuine account/balance exhaustion (401 or 403)
+                if is_permanent_quota(response.status_code, response.text):
                     self._retire_key(key, last_detail)
                     continue
 
+                # 2. Rate limit (429) -> Circuit breaker pause across all workers, DO NOT retire key
                 if response.status_code == 429:
-                    # Said out loud, because progress is only printed when a
-                    # clip finishes and a throttled run otherwise looks busy.
-                    print(f"   rate limited, waiting {delay:.0f}s "
-                          f"(attempt {attempt + 1}/{self.submit_attempts})",
-                          flush=True)
-                elif response.status_code < 500:
+                    print(f"   [Agnes] Rate limit (429) hit. Pausing pool for 65s (attempt {attempt + 1}/{self.submit_attempts})...", flush=True)
+                    self.gate.throttle(65.0)
+                    self.keys.cooldown_key(key, 65.0)
+                    attempt += 1
+                    continue
+
+                # 3. Model failure (5xx server error, or rejection) -> Fallback to 2.5-flash
+                if active_model != self.FALLBACK_MODEL:
+                    with self._model_lock:
+                        if self.model != self.FALLBACK_MODEL:
+                            print(f"   [Agnes] {active_model} failed ({response.status_code}), falling back to {self.FALLBACK_MODEL}", flush=True)
+                            self.model = self.FALLBACK_MODEL
+                    active_model = self.FALLBACK_MODEL
+                    # Delay fallback to respect IP rate window
+                    self.gate.throttle(10.0)
+                    attempt += 1
+                    continue
+
+                if response.status_code < 500:
                     raise VisualError(f"submit rejected, {last_detail}")
 
             attempt += 1
@@ -757,7 +815,7 @@ class AgnesProvider:
         while time.monotonic() < deadline:
             time.sleep(self.poll_interval)
             status = httpx.get(
-                self.POLL_URL, params={"video_id": video_id},
+                self.POLL_URL, params={"video_id": video_id, "model_name": active_model},
                 headers=headers, timeout=30,
             ).json()
             state = str(status.get("status") or "").lower()
@@ -770,6 +828,8 @@ class AgnesProvider:
             raise VisualError(f"agnes: timed out after {self.timeout:.0f}s")
 
         cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / _cache_name(self.name, active_model, prompt, frames, variant,
+                                       "ref" if reference else "txt")
         with httpx.stream("GET", url, timeout=300, follow_redirects=True) as stream:
             stream.raise_for_status()
             with path.open("wb") as handle:

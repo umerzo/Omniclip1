@@ -76,9 +76,9 @@ def repair_json(raw: str) -> dict:
 class AIModelRouter:
     """Manages AI model execution across high, medium, and fast tiers."""
 
-    PRIMARY_MODEL = "google/gemini-3.8-flash"
-    SECONDARY_MODEL = "google/gemini-3.7-flash"
-    FALLBACK_MODEL = "minimax/minimax-m3:free"
+    PRIMARY_MODEL = "google/gemini-2.5-flash"
+    SECONDARY_MODEL = "minimax/minimax-m3"
+    FALLBACK_MODEL = "meta-llama/llama-3.3-70b-instruct"
     GROQ_MODEL = "openai/gpt-oss-120b"
 
     def __init__(

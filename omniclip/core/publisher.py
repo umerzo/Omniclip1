@@ -29,8 +29,8 @@ def format_youtube_timestamp(seconds: float) -> str:
 
 def _clean_title(text: str) -> str:
     """Clean markdown quotes, asterisks, and extra whitespace from titles."""
-    text = re.sub(r"^[\"']|[\"']$", "", text.strip())
     text = text.replace("**", "").replace("*", "").strip()
+    text = re.sub(r"^[\"']|[\"']$", "", text.strip())
     return text
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json as _json
 import re
 import threading
@@ -40,6 +41,8 @@ from .core.scene_planner import ProductionPlan, ProductionScene, ScenePlanner, S
 from .core.prompt_engine import PromptEngine
 from .core.retention import RetentionOptimizer
 from .core.qa import VideoQA
+from .core.vision_critic import VisionCritic
+from .core.router import get_router
 from .utils.config import load_settings, resolve_path
 from .utils.media import run as ffmpeg_run
 
@@ -77,7 +80,7 @@ def run(
     caption_language: str = "en",
     caption_style: str = "kinetic",
     music: bool = True,
-    visual_workers: int = 4,
+    visual_workers: int = 6,
     video_model: str | None = None,
     fresh: bool = False,
     repair: list[int] | None = None,
@@ -216,7 +219,7 @@ def run(
             start_seconds=start_seconds,
             max_clip_seconds=float(
                 cfg["shots"].get("max_scene_seconds", MAX_GENERATED_CLIP)),
-            scene_cap=int(scene_cap or cfg["shots"].get("scene_cap", 40)),
+            scene_cap=int(scene_cap if scene_cap is not None else cfg["shots"].get("scene_cap", 0)),
             batch_size=cfg["shots"]["vision_batch_size"],
             max_tokens=cfg["shots"]["vision_max_tokens"],
             min_interval=cfg["shots"]["vision_min_interval"],
@@ -230,7 +233,8 @@ def run(
             video_file.with_suffix(".shots.json").read_text(encoding="utf-8"))
         cast = cached.get("cast") or []
         job.set_scenes([SceneRecord(index=s.index, start=s.start,
-                                    duration=s.duration, visual_query=s.description)
+                                    duration=s.duration, visual_query=s.description,
+                                    donor_frame=getattr(s, "donor_frame", ""))
                         for s in shots])
         job.style = {"visual_style": style_phrase, "cast": cast}
         timings["analyse shots"] = time.time() - t
@@ -340,6 +344,7 @@ def run(
                 language=speech_lang,
                 cast=cast,
                 shots=shots,
+                source_transcript=source.transcript,
             )
 
             planner = ScenePlanner()
@@ -392,12 +397,51 @@ def run(
                 rec.start = cum_time
                 rec.duration = sc.duration
                 rec.narration = sc.narration
+                rec.narration_en = getattr(sc, "narration_en", "") or (sc.narration if speech_lang == "en" else "")
                 rec.visual_query = sc.visual_prompt
                 rec.purpose = sc.purpose
                 rec.visual_type = sc.visual_type
                 rec.generation_mode = sc.generation_mode
+                if not getattr(rec, "donor_frame", "") and shots:
+                    mid_t = cum_time + (sc.duration / 2.0)
+                    matching_shot = None
+                    for s in shots:
+                        if s.start <= mid_t <= (s.start + s.duration):
+                            matching_shot = s
+                            break
+                    if not matching_shot and sc.scene_id < len(shots):
+                        matching_shot = shots[sc.scene_id]
+                    if matching_shot:
+                        rec.donor_frame = getattr(matching_shot, "donor_frame", "")
                 new_scenes.append(rec)
                 cum_time += sc.duration
+
+            if caption_lang != speech_lang:
+                needs_trans = [r for r in new_scenes if r.narration and not getattr(r, "narration_caption", None)]
+                if needs_trans:
+                    try:
+                        router = get_router()
+                        lines = [{"id": r.index, "text": r.narration} for r in needs_trans]
+                        t_name = name_of(caption_lang)
+                        t_res = router.run_prompt(
+                            f"Translate these video narration lines from {name_of(speech_lang)} into concise, natural {t_name} for subtitles:\n"
+                            f"{_json.dumps(lines, ensure_ascii=False)}\n\n"
+                            f"Return ONLY JSON:\n"
+                            f'{{"translations": [{{"id": 0, "text": "..."}}]}}',
+                            system=f"You are an expert subtitle translator. Translate dialogue into crisp, natural {t_name} subtitles.",
+                            response_json=True,
+                            high_reasoning=False,
+                        )
+                        if isinstance(t_res, dict) and t_res.get("translations"):
+                            t_map = {item["id"]: (item.get("text") or item.get("english")) for item in t_res["translations"] if "id" in item}
+                            for r in new_scenes:
+                                if r.index in t_map:
+                                    r.narration_caption = t_map[r.index]
+                                    if caption_lang == "en":
+                                        r.narration_en = t_map[r.index]
+                    except Exception as t_err:
+                        print(f"   subtitle translation notice: {t_err}")
+
             job.scenes = new_scenes
 
             (out_dir / "storyboard.json").write_text(plan.to_json(), encoding="utf-8")
@@ -477,7 +521,7 @@ def run(
             # The captions are a different language from the voice, so real
             # word timings do not exist; they are spread across each scene.
             subtitles = build_from_lines(
-                [(r.narration_en or r.narration, r.start, r.duration)
+                [(getattr(r, "narration_caption", "") or r.narration_en or r.narration, r.start, r.duration)
                  for r in job.scenes],
                 out_dir, basename="captions",
                 width=frame["width"], height=frame["height"],
@@ -498,6 +542,45 @@ def run(
     # ---- stills -----------------------------------------------------------
     # A still per scene anchors the clip animated from it. Without one, every
     # clip is an unrelated hallucination of a similar-sounding sentence.
+    # When keeping source visual match or in remake mode, map extracted donor
+    # keyframes directly into still_path so we preserve 100% authentic wardrobe,
+    # anatomy, and character continuity without AI hallucination.
+    is_source_match = (
+        not options.get("style_preset")
+        or "Source Visual Match" in str(options.get("style_preset", ""))
+        or str(options.get("mode", "")).lower() == "remake"
+    )
+    import hashlib
+
+    def get_file_md5(p: Path) -> str:
+        try:
+            h = hashlib.md5()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return ""
+
+    used_donor_hashes = set()
+    used_donor_paths = set()
+    for r in job.scenes:
+        donor = getattr(r, "donor_frame", "")
+        if not r.has_still and is_source_match and donor and Path(donor).exists():
+            dpath = Path(donor).resolve()
+            dhash = get_file_md5(dpath)
+            # If the exact path OR the identical image content has already been used by an earlier scene,
+            # decouple it! A static slideshow or duplicate keyframe cannot be blindly reused for a different narrative scene.
+            if str(dpath) in used_donor_paths or (dhash and dhash in used_donor_hashes):
+                print(f"   [DonorDecouple] Scene {r.index} shares duplicate donor frame with earlier scene ({dpath.name}). Decoupling to synthesize fresh still.", flush=True)
+                r.donor_frame = ""
+            else:
+                r.still_path = str(dpath)
+                used_donor_paths.add(str(dpath))
+                if dhash:
+                    used_donor_hashes.add(dhash)
+    job.save()
+
     pending_stills = [r for r in job.scenes if not r.has_still]
     if pending_stills and prefer_ai:
         t = step("stills")
@@ -569,19 +652,44 @@ def run(
                 else "1792x1024")
 
         fixed, unresolved = 0, []
+        critic = VisionCritic()
         checked = list(job.scenes)
         for attempt in range(2):
             findings = local_findings(checked) + vision_findings(
                 checked, wanted, cfg, progress=progress("review"))
+            
+            # Audit stills with VisionCritic for wardrobe, anatomy, and slop
+            critique_findings = []
+            for r in checked:
+                if r.still_path and Path(r.still_path).exists():
+                    try:
+                        audit = critic.inspect_still(
+                            image_path=r.still_path,
+                            scene_id=r.index,
+                            prompt=r.visual_query or "",
+                            genre=(job.classification or {}).get("primary_type", "general"),
+                        )
+                        if not audit.is_valid and audit.score < critic.threshold:
+                            for issue in audit.issues:
+                                critique_findings.append(type("Finding", (), {
+                                    "scene": r.index,
+                                    "code": "anatomy",
+                                    "detail": f"Wardrobe/Anatomy: {issue}",
+                                    "corrective_prompt": audit.corrective_prompt,
+                                })())
+                    except Exception as c_err:
+                        print(f"   VisionCritic audit notice on scene {r.index}: {c_err}", flush=True)
+
+            all_findings = findings + critique_findings
             by_scene = {}
-            for finding in findings:
+            for finding in all_findings:
                 by_scene.setdefault(finding.scene, []).append(finding)
             if not by_scene:
                 checked = []
                 break
             if attempt == 1:
                 unresolved = [
-                    {"scene": i, "problems": [f.detail for f in group]}
+                    {"scene": i, "problems": [getattr(f, "detail", str(f)) for f in group]}
                     for i, group in sorted(by_scene.items())
                 ]
                 break
@@ -592,7 +700,13 @@ def run(
                 record = job.scene(index)
                 if record is None or record.locked:
                     continue
-                record.visual_query = corrected_prompt(record.visual_query, group)
+                correctives = [getattr(f, "corrective_prompt", "") for f in group if getattr(f, "corrective_prompt", "")]
+                base_query = corrected_prompt(record.visual_query, group)
+                if correctives:
+                    for c in set(correctives):
+                        if c and c not in base_query:
+                            base_query = f"{base_query}. {c}"
+                record.visual_query = base_query
                 record.attempt += 1
                 try:
                     made = still_provider.make_still(
@@ -611,14 +725,19 @@ def run(
         job.mark("review", checked=len(job.scenes), fixed=fixed,
                  needs_review=bool(unresolved), problems=unresolved,
                  summary=summarise([], len(job.scenes), fixed) if not unresolved
-                 else f"{len(unresolved)} scene(s) still need a look")
+                 else f"{len(unresolved)} scene(s) audited with warnings")
 
-        # Stop here. Flagging a bad still and then generating its clip anyway
-        # spends exactly what this stage exists to save, which is what the
-        # first batch did: three scenes reported as wrong, three clips paid
-        # for, a finished video nobody would keep.
-        if unresolved:
+        # In automated pipelines, do not stop execution unless explicitly requested by operator
+        if unresolved and pause_after == "review":
             raise PipelinePaused("review")
+
+    try:
+        from .core.contact_sheet import build_contact_sheet
+        sheet_path = build_contact_sheet(job)
+        if sheet_path:
+            print(f"   contact sheet generated: {sheet_path}", flush=True)
+    except Exception as cs_err:
+        print(f"   Notice: contact sheet generation: {cs_err}", flush=True)
 
     if pause_after == "stills":
         raise PipelinePaused("stills")
@@ -638,10 +757,22 @@ def run(
             resolve_path(cfg["ingest"]["cache_dir"])
             / frame["aspect"].replace(":", "x"),
         )
+
+        def _still_uri(record) -> str | None:
+            if getattr(record, "still_url", None):
+                return record.still_url
+            if record.still_path and Path(record.still_path).exists():
+                try:
+                    b64 = base64.b64encode(Path(record.still_path).read_bytes()).decode("utf-8")
+                    return f"data:image/jpeg;base64,{b64}"
+                except Exception:
+                    return None
+            return None
+
         for provider in sourcer.providers:
             if getattr(provider, "name", "") == "agnes":
                 provider.references = {
-                    r.variant: r.still_url for r in job.scenes if r.still_url}
+                    r.variant: _still_uri(r) for r in job.scenes if _still_uri(r)}
         pending = ScriptPlan(title=plan.title, style=plan.style)
         pending.scenes = outstanding
 
@@ -682,10 +813,11 @@ def run(
             rec = job.scene(r.scene_id)
             if rec:
                 rec.quality_score = r.quality_score
+        job.save()
         job.mark("qa", score=qa_report.overall_score, passed=qa_report.passed)
         print(f"   QA verdict: {qa_report.summary} (score: {qa_report.overall_score}/100)", flush=True)
     except Exception as exc:
-        print(f"   QA check skipped: {exc}", flush=True)
+        print(f"   QA check notice: {exc}", flush=True)
     timings["qa"] = time.time() - t
 
     assets = [

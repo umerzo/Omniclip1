@@ -360,12 +360,33 @@ class ScriptBrain:
                     **kwargs,
                 )
             except (RateLimitError, APIStatusError) as exc:
-                if getattr(exc, "status_code", None) not in (413, 429):
-                    raise
                 last_error = exc
-                time.sleep(delay)
-                delay *= 2
-                continue
+                status = getattr(exc, "status_code", None)
+                if status in (413, 429):
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                # If 404 and model had :free suffix, auto-migrate to paid slug immediately
+                if status == 404 and ":free" in self.model:
+                    try:
+                        self.model = self.model.replace(":free", "")
+                        response = self.client.chat.completions.create(
+                            model=self.model,
+                            temperature=self.temperature,
+                            messages=[{"role": "user", "content": prompt}],
+                            **kwargs,
+                        )
+                        choice = response.choices[0]
+                        content = (choice.message.content or "").strip()
+                        if content:
+                            return content
+                    except Exception as inner_exc:
+                        last_error = inner_exc
+                # Non-rate-limit error (e.g. 404, 401, 403, 5xx): break to fallback client immediately
+                break
+            except Exception as exc:
+                last_error = exc
+                break
 
             choice = response.choices[0]
             content = (choice.message.content or "").strip()

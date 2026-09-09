@@ -66,10 +66,17 @@ class PromptEngine:
             parts.append("No irrelevant background clutter or unrelated figures.")
         elif "food" in genre:
             parts.append("Culinary visual focus: appetizing textures, precise culinary technique, fresh ingredients, steam/sizzle details.")
-        elif bible.characters and genre in ("cinematic_story", "short_story", "documentary"):
-            char_desc = "; ".join(f"{c.get('name')} ({c.get('appearance')})" for c in bible.characters if c.get("name"))
+
+        # Always enforce recurring character continuity if characters exist in the Bible
+        if bible.characters:
+            char_desc = "; ".join(f"{c.get('name', c.get('id', 'Character'))}: {c.get('appearance')}" for c in bible.characters if c.get('appearance'))
             if char_desc:
-                parts.append(f"Character continuity: {char_desc}.")
+                parts.append(f"Characters (preserve exact appearance): {char_desc}.")
+
+        # Cultural wardrobe integrity & modesty enforcement
+        combined_text = f"{scene.visual_prompt} {' '.join(str(c) for c in bible.characters)}".lower()
+        if any(w in combined_text for w in ["shalwar", "salwar", "kameez", "kurta", "kurti", "dupatta", "desi", "traditional", "abaya", "thobe", "churidar"]):
+            parts.append("Wardrobe modesty: Authentic full-length ankle-covering trousers, pants reach all the way down to the ankles and feet, fully covered legs, strictly no exposed calves, no bare legs, culturally authentic South Asian attire.")
 
         # 4. Environment & Lighting
         if scene.environment:
@@ -119,6 +126,7 @@ RULES:
 2. Is the main subject correct (e.g. car for car video, product for product video)?
 3. Does it avoid unwanted pedestrians/characters if not a character video?
 4. Is it physically plausible and cinematographically sound?
+5. Cultural & wardrobe accuracy: If wearing traditional attire (shalwar kameez, kurta, etc.), ensure trousers are strictly full ankle-length with zero exposed legs or calves.
 
 Return JSON:
 {{

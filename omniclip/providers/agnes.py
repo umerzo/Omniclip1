@@ -15,15 +15,22 @@ import httpx
 
 from .base import QuotaExhausted, VideoGenerationProvider, VisualAsset, VisualError
 
-QUOTA_MARKERS = (
-    "free user", "upgrade", "token plan", "quota", "insufficient",
-    "billing", "credit", "subscribe", "plan to unlock",
+PERMANENT_QUOTA_MARKERS = (
+    "insufficient_user_quota", "用户额度不足", "insufficient quota",
+    "account suspended", "invalid api key", "balance exhausted",
 )
+
+
+def is_permanent_quota(status_code: int, text: str) -> bool:
+    if status_code in (401, 403):
+        return True
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in PERMANENT_QUOTA_MARKERS)
 
 
 def is_quota_message(text: str) -> bool:
     lowered = (text or "").lower()
-    return any(marker in lowered for marker in QUOTA_MARKERS)
+    return any(marker in lowered for marker in PERMANENT_QUOTA_MARKERS)
 
 
 def _cache_name(source: str, *parts, suffix: str = ".mp4") -> str:
@@ -73,7 +80,8 @@ class AgnesKeyPool:
             return sum(1 for kid in self.keys_map if kid not in self._retired)
 
     def acquire(self, timeout: float = 900.0) -> str:
-        deadline = time.monotonic() + timeout
+        effective_timeout = max(timeout, len(self.keys_map) * 80.0)
+        deadline = time.monotonic() + effective_timeout
         while True:
             with self._lock:
                 live = [s for kid, s in self.keys_map.items() if kid not in self._retired]
@@ -90,7 +98,7 @@ class AgnesKeyPool:
                     return candidate.key_value
                 wait = candidate.cooldown_until - now
             if time.monotonic() + wait > deadline:
-                raise VisualError(f"Agnes: no key free within {timeout:.0f}s")
+                raise VisualError(f"Agnes: no key free within {effective_timeout:.0f}s")
             time.sleep(min(wait, 5.0))
 
     def peek_ready(self) -> str:
@@ -98,7 +106,8 @@ class AgnesKeyPool:
             live = [s for kid, s in self.keys_map.items() if kid not in self._retired]
             if not live:
                 raise QuotaExhausted("All Agnes API generation keys are exhausted.")
-            return live[0].key_value
+            self._peek_idx = (getattr(self, "_peek_idx", 0) + 1) % len(live)
+            return live[self._peek_idx].key_value
 
 
 class GlobalLimiter:
@@ -119,6 +128,12 @@ class GlobalLimiter:
                 delay = self._next - now
             time.sleep(min(delay, 5.0))
 
+    def throttle(self, delay_seconds: float = 65.0) -> None:
+        """Global circuit breaker: pause all workers on an IP-level 429 throttle."""
+        with self._lock:
+            now = time.monotonic()
+            self._next = max(self._next, now + delay_seconds)
+
 
 class AgnesProvider(VideoGenerationProvider):
     """Primary AI-generated video and still clip provider via Agnes API."""
@@ -126,7 +141,8 @@ class AgnesProvider(VideoGenerationProvider):
     name = "agnes"
     BASE_URL = "https://apihub.agnes-ai.com/v1"
     POLL_URL = "https://apihub.agnes-ai.com/agnesapi"
-    FALLBACK_MODEL = "agnes-video-v2.0"
+    DEFAULT_MODEL = "agnes-video-v2.0"
+    FALLBACK_MODEL = "agnes-video-2.5-flash"
     IMAGE_MODEL = "agnes-image-2.1-flash"
     MAX_CLIP_SECONDS = 20
     FRAME_RATE = 24
@@ -204,8 +220,11 @@ class AgnesProvider(VideoGenerationProvider):
                 )
                 if response.status_code < 400:
                     break
-                if is_quota_message(response.text):
-                    self.pool.retire(key, f"Still image quota 429")
+                if response.status_code == 429:
+                    time.sleep(3.0)
+                    continue
+                if is_permanent_quota(response.status_code, response.text):
+                    self.pool.retire(key, f"Still image quota {response.status_code}")
                     continue
             except Exception:
                 continue
@@ -242,7 +261,8 @@ class AgnesProvider(VideoGenerationProvider):
     ) -> VisualAsset | None:
         """Generate video clip from prompt or reference still."""
         fitted = self._fit_prompt(query)
-        path = cache_dir / _cache_name(self.name, fitted, variant, suffix=".mp4")
+        active_model = self.model
+        path = cache_dir / _cache_name(self.name, active_model, fitted, variant, suffix=".mp4")
         if path.exists():
             return VisualAsset(path=path, source=self.name, query=query)
 
@@ -251,19 +271,36 @@ class AgnesProvider(VideoGenerationProvider):
         still_path = kwargs.get("still_path")
 
         frames = self._frames_for(min_duration)
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "prompt": fitted,
-            "width": self.width,
-            "height": self.height,
-            "num_frames": frames,
-        }
-        if reference_url:
-            payload["image_url"] = reference_url
-        elif still_path and Path(still_path).exists():
-            # Pass base64 data uri if local
-            b64_data = base64.b64encode(Path(still_path).read_bytes()).decode()
-            payload["image_url"] = f"data:image/jpeg;base64,{b64_data}"
+
+        if str(active_model).startswith("agnes-video-2.5"):
+            is_portrait = self.height > self.width
+            aspect = "9:16" if is_portrait else "16:9"
+            valid_http_ref = bool(reference_url and (reference_url.startswith("http://") or reference_url.startswith("https://")))
+            payload: dict[str, Any] = {
+                "model": active_model,
+                "prompt": f"{fitted}, sharp focus, pristine details, cinematic smooth motion",
+                "mode": "reference" if valid_http_ref else "text",
+                "size": "720P",
+                "aspect_ratio": aspect,
+                "seconds": str(int(min(12, max(4, round(min_duration))))),
+            }
+            if valid_http_ref:
+                payload["images"] = [reference_url]
+        else:
+            w = max(64, (self.width // 64) * 64)
+            h = max(64, (self.height // 64) * 64)
+            payload = {
+                "model": active_model,
+                "prompt": fitted,
+                "width": w,
+                "height": h,
+                "num_frames": frames,
+            }
+            if reference_url:
+                payload["image_url"] = reference_url
+            elif still_path and Path(still_path).exists():
+                b64_data = base64.b64encode(Path(still_path).read_bytes()).decode()
+                payload["image_url"] = f"data:image/jpeg;base64,{b64_data}"
 
         self.gate.wait()
         key = self.pool.acquire()
@@ -276,8 +313,11 @@ class AgnesProvider(VideoGenerationProvider):
                 timeout=90,
             )
             if resp.status_code >= 400:
-                if is_quota_message(resp.text):
-                    self.pool.retire(key, "Video generation 429 quota")
+                if resp.status_code == 429:
+                    self.gate.throttle(65.0)
+                    raise VisualError("Agnes rate limited (429), will retry.")
+                if is_permanent_quota(resp.status_code, resp.text):
+                    self.pool.retire(key, f"Video quota {resp.status_code}")
                     raise QuotaExhausted("Agnes quota reached on key.")
                 raise VisualError(f"Agnes video submission failed: {resp.status_code}")
 
@@ -286,7 +326,7 @@ class AgnesProvider(VideoGenerationProvider):
                 raise VisualError("No video task ID returned")
 
             # Poll for completion
-            download_url = self._poll_task(task_id, key)
+            download_url = self._poll_task(task_id, key, active_model)
             with httpx.stream("GET", download_url, timeout=180) as stream:
                 stream.raise_for_status()
                 with path.open("wb") as handle:
@@ -306,15 +346,18 @@ class AgnesProvider(VideoGenerationProvider):
                 raise
             raise VisualError(f"Agnes generation error: {exc}") from exc
 
-    def _poll_task(self, task_id: str, key: str) -> str:
+    def _poll_task(self, task_id: str, key: str, model_name: str = "") -> str:
         deadline = time.monotonic() + self.timeout
+        params = {"video_id": task_id}
+        if model_name:
+            params["model_name"] = model_name
         while time.monotonic() < deadline:
             time.sleep(self.poll_interval)
             try:
                 resp = httpx.get(
                     self.POLL_URL,
                     headers={"Authorization": f"Bearer {key}"},
-                    params={"video_id": task_id},
+                    params=params,
                     timeout=30,
                 )
                 if resp.status_code == 200:

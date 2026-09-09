@@ -21,9 +21,8 @@ PROVIDER_LABEL = {
 }
 
 MODEL_LABEL = {
-    "agnes-video-v2.0": "Standard",
-    "agnes-video-2.5-flash": "Fast",
-    "agnes-video-2.5": "High quality",
+    "agnes-video-v2.0": "Standard (Default - 1080p)",
+    "agnes-video-2.5-flash": "Flash (Fast)",
 }
 MODEL_VALUE = {label: name for name, label in MODEL_LABEL.items()}
 
@@ -33,7 +32,6 @@ PROVIDER_CLASS = {"agnes": "gen", "pexels": "stock", "pixabay": "stock"}
 # Longest first, so a specific model name is replaced before the bare vendor.
 _MASK = [
     ("agnes-video-2.5-flash", "Engine Fast"),
-    ("agnes-video-2.5", "Engine HQ"),
     ("agnes-video-v2.0", "Engine Standard"),
     ("agnes-image-2.1-flash", "Engine Image"),
     ("apihub.agnes-ai.com", ENGINE_LABEL),
@@ -75,7 +73,7 @@ def provider_class(name: str) -> str:
 
 
 def model_label(name: str) -> str:
-    return MODEL_LABEL.get(name, "Standard")
+    return MODEL_LABEL.get(name, "Standard (Default - 1080p)")
 
 
 def clean_error(text: str) -> str:

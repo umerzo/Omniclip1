@@ -67,6 +67,7 @@ class SceneRecord:
     visual_query: str = ""
     still_path: str = ""
     still_url: str = ""
+    donor_frame: str = ""
     audio_path: str = ""
     asset_path: str = ""
     asset_source: str = ""

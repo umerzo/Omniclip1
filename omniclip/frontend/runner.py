@@ -31,7 +31,10 @@ def python_exe() -> str:
 
 def build_command(url: str, out_dir: Path, options: dict) -> list[str]:
     """The exact CLI the UI would have typed, so both paths behave alike."""
-    command = [python_exe(), "-u", "-m", "omniclip", url, "--out", str(out_dir)]
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--cli", url, "--out", str(out_dir)]
+    else:
+        command = [python_exe(), "-u", "-m", "omniclip", url, "--out", str(out_dir)]
     if options.get("aspect"):
         command += ["--aspect", options["aspect"]]
     if options.get("mode") and options["mode"] != "auto":
@@ -99,9 +102,11 @@ def is_running(out_dir: str | Path) -> bool:
     alive = False
     try:
         if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             result = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                 capture_output=True, text=True,
+                creationflags=creationflags,
             )
             out_str = (result.stdout or "").lower()
             alive = "no tasks" not in out_str and any(part == str(pid) for part in (result.stdout or "").split())
@@ -130,7 +135,10 @@ def start(url: str, out_dir: str | Path, options: dict) -> int:
     creationflags = 0
     if os.name == "nt":
         # Detach so closing the Streamlit process does not take the job with it.
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
 
     process = subprocess.Popen(
         build_command(url, out_dir, options),
@@ -155,8 +163,9 @@ def stop(out_dir: str | Path) -> bool:
         return False
     try:
         if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True)
+                           capture_output=True, creationflags=creationflags)
         else:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
     except (OSError, subprocess.SubprocessError):

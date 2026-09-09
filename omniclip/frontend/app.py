@@ -61,7 +61,7 @@ def slug_for(url: str, taken: set[str]) -> str:
 def page_new() -> None:
     theme.head(
         "New build",
-        "Paste a YouTube link or topic. Gemini 3.8 Flash extracts its Content DNA, "
+        "Paste a YouTube link or topic. Gemini 3.7 Flash extracts its Content DNA, "
         "determines the exact video format, and creates an original, high-retention video.")
 
     cfg = load_settings()
@@ -81,11 +81,43 @@ def page_new() -> None:
     url = ""
     topic = ""
     if input_mode == "YouTube Video Link":
-        url = st.text_input(
-            "YouTube URL",
-            placeholder="https://www.youtube.com/watch?v=... or https://www.youtube.com/shorts/...",
-            key="new_url_input",
-            help="Video can be a Short or Long-form video across any genre.")
+        col_url, col_probe = st.columns([5, 1])
+        with col_url:
+            url = st.text_input(
+                "YouTube URL",
+                placeholder="https://www.youtube.com/watch?v=... or https://www.youtube.com/shorts/...",
+                key="new_url_input",
+                help="Video can be a Short or Long-form video across any genre.")
+        with col_probe:
+            st.write("")
+            probe_requested = st.button("Probe", key="btn_probe_source", use_container_width=True, disabled=not url.strip())
+
+        clean_url = url.strip()
+        last_url = st.session_state.get("last_probed_url", "")
+        if clean_url and (clean_url != last_url or probe_requested):
+            try:
+                from omniclip.core.prober import probe_source
+                with st.spinner("Probing video source, audio language, and format..."):
+                    probed = probe_source(clean_url)
+                st.session_state["last_probed_url"] = clean_url
+                st.session_state["probed_info"] = probed
+                st.session_state["new_audio_lang_select"] = probed.get("audio_lang", "auto")
+                st.session_state["new_sub_lang_select"] = probed.get("sub_lang", "en")
+                st.session_state["new_target_platform"] = probed.get("platform", "YouTube Shorts (9:16)")
+                st.session_state["new_aspect_select"] = probed.get("aspect", "9:16")
+                if probed.get("kind"):
+                    st.session_state["new_kind_select"] = probed["kind"]
+                st.rerun()
+            except Exception as err:
+                st.session_state["last_probed_url"] = clean_url
+                st.warning(f"Could not auto-probe video: {err}")
+        elif not clean_url and last_url:
+            st.session_state.pop("last_probed_url", None)
+            st.session_state.pop("probed_info", None)
+
+        if st.session_state.get("probed_info"):
+            pinfo = st.session_state["probed_info"]
+            st.info(f"✨ **Auto-Configured from Source**: {pinfo.get('summary', '')}")
     else:
         topic = st.text_area(
             "Topic or Creative Concept",
@@ -95,10 +127,14 @@ def page_new() -> None:
 
     col_plat, col_inst = st.columns([1, 2])
     with col_plat:
+        platform_options = ["YouTube Shorts (9:16)", "YouTube Long-form (16:9)", "TikTok (9:16)", "Instagram Reels (9:16)"]
+        if "new_target_platform" not in st.session_state:
+            st.session_state["new_target_platform"] = "YouTube Shorts (9:16)" if (url and "shorts" in url.lower()) else "YouTube Long-form (16:9)"
+        if st.session_state["new_target_platform"] not in platform_options:
+            st.session_state["new_target_platform"] = platform_options[0]
         target_platform = st.selectbox(
             "Target Platform",
-            ["YouTube Shorts (9:16)", "YouTube Long-form (16:9)", "TikTok (9:16)", "Instagram Reels (9:16)"],
-            index=0 if (url and "shorts" in url.lower()) else 1,
+            platform_options,
             key="new_target_platform",
         )
     with col_inst:
@@ -153,7 +189,7 @@ def page_new() -> None:
                 avoid_list = ", ".join(dna.get("things_to_avoid") or ["AI slop", "static shots"])
                 st.markdown(f"**Anti-Patterns to Avoid:** {avoid_list}")
 
-    st.markdown("#### Sound")
+    st.markdown("#### Sound & Voice")
     col1, col2, col3 = st.columns(3)
     with col1:
         audio = st.selectbox(
@@ -168,29 +204,52 @@ def page_new() -> None:
             help="Match the source reads the video DNA and decides. A bulletin gets "
                  "no music, a meditation is mostly music.")
     with col2:
-        language = st.text_input("Spoken language", value="",
-                                 placeholder="Same as the source",
-                                 key="new_language_input",
-                                 help="A language code such as en, ur or es.")
+        from omniclip.core.prober import AUDIO_LANGUAGES, SUBTITLE_LANGUAGES, LANG_NAME_MAP
+        audio_codes = [c for c, _ in AUDIO_LANGUAGES]
+        audio_labels = dict(AUDIO_LANGUAGES)
+        if "new_audio_lang_select" not in st.session_state:
+            st.session_state["new_audio_lang_select"] = "auto"
+        if st.session_state["new_audio_lang_select"] not in audio_codes:
+            st.session_state["new_audio_lang_select"] = "auto"
+        audio_lang = st.selectbox(
+            "Audio Language",
+            audio_codes,
+            format_func=lambda c: audio_labels.get(c, c),
+            key="new_audio_lang_select",
+            help="Primary spoken narration language. Supports English, Urdu, Hindi, Punjabi, Spanish, Arabic, and more."
+        )
     with col3:
-        caption_language = st.text_input("Caption language", value="en", key="new_caption_language_input")
+        sub_codes = [c for c, _ in SUBTITLE_LANGUAGES]
+        sub_labels = dict(SUBTITLE_LANGUAGES)
+        if "new_sub_lang_select" not in st.session_state:
+            st.session_state["new_sub_lang_select"] = "en"
+        if st.session_state["new_sub_lang_select"] not in sub_codes:
+            st.session_state["new_sub_lang_select"] = "en"
+        sub_lang = st.selectbox(
+            "Subtitle Language",
+            sub_codes,
+            format_func=lambda c: sub_labels.get(c, c),
+            key="new_sub_lang_select",
+            help="Language for animated captions. Choose English, Same as Audio, or another language."
+        )
 
-    voice_options = voices_for_language(language.strip() or "en")
+    probed_audio = st.session_state.get("probed_info", {}).get("audio_lang", "en")
+    effective_audio_lang = probed_audio if audio_lang == "auto" else audio_lang
+
+    voice_options = voices_for_language(effective_audio_lang)
     vcol1, vcol2 = st.columns([3, 1])
     with vcol1:
         voice = st.selectbox("Voice", ["Choose automatically"] + voice_options,
                              key="new_voice_select",
-                             help="Automatic picks a voice that suits the language.")
+                             help=f"Automatic chooses the best neural narrator for {audio_labels.get(effective_audio_lang, effective_audio_lang)}.")
     with vcol2:
         st.write("")
         if st.button("Hear it", key="new_btn_hear_voice", disabled=voice == "Choose automatically",
                      use_container_width=True):
             _preview_voice(voice)
 
-    captions_on = st.toggle(
-        "Burn in captions", value=True,
-        key="new_captions_toggle",
-        help="Captions use the caption language whatever the voice speaks.")
+    captions_on = (sub_lang != "none")
+    caption_language = effective_audio_lang if sub_lang == "same" else sub_lang
 
     caption_style = "kinetic"
     if captions_on:
@@ -206,21 +265,38 @@ def page_new() -> None:
             )
             caption_style = "kinetic" if "Kinetic" in caption_style_choice else "standard"
         with cap_col2:
+            target_cap_name = sub_labels.get(sub_lang, sub_lang.upper())
             if caption_style == "kinetic":
-                st.caption("⚡ **Kinetic Active**: High-impact word pop-in scaling, dynamic safe-zone vertical placement, and punchy 3-word cadence.")
+                st.caption(f"⚡ **Kinetic Active ({target_cap_name})**: High-impact word pop-in scaling, dynamic safe-zone vertical placement, and punchy cadence.")
             else:
-                st.caption("📄 **Standard Active**: Classic bottom-aligned subtitle bar with smooth multi-word phrasing.")
+                st.caption(f"📄 **Standard Active ({target_cap_name})**: Classic bottom-aligned subtitle bar with smooth multi-word phrasing.")
 
     st.markdown("#### Picture")
     pcol1, pcol2, pcol3 = st.columns(3)
     with pcol1:
         aspect_default = "9:16" if "9:16" in target_platform else "16:9"
-        aspect = st.selectbox("Frame", ["9:16", "16:9", "1:1"], index=0 if aspect_default == "9:16" else 1, key="new_aspect_select")
+        aspect_choices = ["9:16", "16:9", "1:1"]
+        if "new_aspect_select" not in st.session_state:
+            st.session_state["new_aspect_select"] = aspect_default
+        if st.session_state["new_aspect_select"] not in aspect_choices:
+            st.session_state["new_aspect_select"] = aspect_default
+        aspect = st.selectbox("Frame", aspect_choices, key="new_aspect_select")
     with pcol2:
-        quality = st.selectbox("Quality", list(labels.MODEL_VALUE), index=0, key="new_quality_select")
+        quality = st.selectbox(
+            "Video Engine Model",
+            list(labels.MODEL_VALUE),
+            index=0,
+            key="new_quality_select",
+            help="Standard (Default): Agnes v2.0 with Lanczos 1080p upscaling. Flash: Agnes 2.5-flash for rapid previews.",
+        )
     with pcol3:
+        kind_choices = ["Detect automatically"] + list(KINDS)
+        if "new_kind_select" not in st.session_state:
+            st.session_state["new_kind_select"] = "Detect automatically"
+        if st.session_state["new_kind_select"] not in kind_choices:
+            st.session_state["new_kind_select"] = "Detect automatically"
         kind = st.selectbox(
-            "Kind of video", ["Detect automatically"] + list(KINDS),
+            "Kind of video", kind_choices,
             format_func=lambda v: v.replace("_", " ").title()
             if v != "Detect automatically" else v,
             key="new_kind_select",
@@ -243,20 +319,28 @@ def page_new() -> None:
         help="Applies cinematic color grading, art direction, and lighting aesthetics across all scene stills and clips."
     )
 
-    allow_stock = st.toggle(
-        "Allow stock footage as a fallback",
-        value=bool(cfg["visuals"].get("allow_stock", True)),
-        key="new_allow_stock_toggle",
-        help="Off means every shot is AI generated via Agnes. On lets a "
-             "scene fall back to Pexels/Pixabay if Agnes capacity is spent.")
+    visual_source_mode = st.radio(
+        "Visual Sourcing Engine",
+        [
+            "🎬 Bespoke AI Generation (Agnes + Stock Fallback)",
+            "✨ Pure AI Generation Only (No Stock)",
+            "🎞️ Stock Footage Only (Pexels / Pixabay - No AI)",
+        ],
+        index=0,
+        horizontal=True,
+        key="new_visual_source_mode",
+        help="AI Generation: Bespoke AI generation with automatic fallback to stock libraries if quota/rate limits occur. Pure AI: AI generation exclusively. Stock Only: High-speed stock footage sourcing without AI generation."
+    )
+    allow_stock = "Fallback" in visual_source_mode or "Stock Footage Only" in visual_source_mode
+    prefer_ai = "Stock Footage Only" not in visual_source_mode
 
     with st.expander("Advanced"):
         acol1, acol2, acol3 = st.columns(3)
         with acol1:
             scene_cap = st.number_input(
-                "Scene budget", 4, 200, int(cfg["shots"].get("scene_cap", 40)),
+                "Scene budget (0 = Unlimited)", 0, 2000, int(cfg["shots"].get("scene_cap", 0)),
                 key="new_scene_cap_input",
-                help="One scene is roughly a minute of generation.")
+                help="0 means unlimited 1:1 cuts matching the donor video exactly, whether 30 seconds or 1 hour.")
             start_at = st.number_input("Skip opening seconds", 0.0, 600.0, 0.0,
                                        step=1.0,
                                        key="new_start_at_input")
@@ -295,16 +379,17 @@ def page_new() -> None:
         options = {
             "aspect": aspect,
             "no_stock": not allow_stock,
+            "no_ai": not prefer_ai,
             "audio": audio,
             "no_captions": not captions_on,
             "caption_style": caption_style,
             "voice": None if voice == "Choose automatically" else voice,
             "kind": None if kind == "Detect automatically" else kind,
-            "language": language.strip() or None,
-            "caption_language": caption_language.strip() or "en",
+            "language": None if audio_lang == "auto" else audio_lang,
+            "caption_language": caption_language.strip() if isinstance(caption_language, str) else "en",
             "no_music": not music,
             "no_review": not review,
-            "scene_cap": int(scene_cap),
+            "scene_cap": int(scene_cap) if int(scene_cap) > 0 else 0,
             "video_model": labels.MODEL_VALUE[quality],
             "start": float(start_at) or None,
             "trim": float(trim) or None,
@@ -836,4 +921,5 @@ def main() -> None:
     PAGES[st.session_state["selected_page"]]()
 
 
-main()
+if __name__ == "__main__":
+    main()

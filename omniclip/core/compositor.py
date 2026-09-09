@@ -43,7 +43,7 @@ def normalize_clip(
             "-t", f"{duration:.3f}",
             "-an",
             "-vf", (
-                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop={width}:{height},fps={fps},setsar=1"
             ),
             "-c:v", "libx264",

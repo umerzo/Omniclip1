@@ -168,27 +168,21 @@ class Storyboard:
 MAX_GENERATED_CLIP = 19.0
 
 
-def target_scene_seconds(duration: float, cap: int = 40,
+def target_scene_seconds(duration: float, cap: int = 0,
                          native: float = 0.0,
                          ceiling: float = MAX_GENERATED_CLIP) -> float:
     """How long a scene should run.
 
-    `native` is how long the source's own shots run. When we know it, we follow
-    it: a short that cuts every two seconds should be rebuilt as two-second
-    scenes, because that pace is most of what makes it feel like the original.
-    Deriving the length from total duration alone rebuilt such a short as four
-    long takes -- a quarter of its shots and none of its rhythm.
-
-    The floor is what keeps this affordable. Every scene is about a minute of
-    generation, so a long video that cuts quickly is not given hundreds of
-    scenes; it is given `cap` of them.
+    When cap <= 0 (unlimited), OmniClip follows 1:1 natural camera cuts
+    with zero artificial cut merging, whether the video is 30 seconds or 1 hour.
     """
-    floor = max(2.0, duration / cap)
+    has_cap = bool(cap and cap > 0)
+    floor = max(1.5, duration / cap) if has_cap else 1.5
     if native > 0:
         return min(ceiling, max(floor, native))
     if duration <= 90:
         return min(ceiling, 6.0)
-    return min(ceiling, max(12.0, duration / cap))
+    return min(ceiling, max(6.0, (duration / cap) if has_cap else 4.0))
 
 
 _PROMPT = """You are adapting a video into an original one of the same kind.

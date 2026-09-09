@@ -73,6 +73,7 @@ class ProductionScene:
     purpose: str
     duration: float
     narration: str
+    narration_en: str = ""
     dialogue: str = ""
     visual_type: str = "cinematic_shot"
     visual_prompt: str = ""
@@ -100,6 +101,7 @@ class ProductionScene:
             purpose=purpose,
             duration=float(data.get("duration", 4.0)),
             narration=data.get("narration", ""),
+            narration_en=data.get("narration_en", ""),
             dialogue=data.get("dialogue", ""),
             visual_type=data.get("visual_type", "cinematic_shot"),
             visual_prompt=data.get("visual_prompt", ""),
@@ -253,7 +255,15 @@ Output a JSON object with this exact schema:
                         c_id = c.get("id", c.get("name", ""))
                         if c_id.lower() not in existing_names:
                             bible_chars.append({"name": c_id, "appearance": c.get("appearance", "")})
-                return ProductionPlan.from_dict(res)
+                plan = ProductionPlan.from_dict(res)
+                beat_map = {b.index: b for b in script.beats}
+                for sc in plan.scenes:
+                    if sc.scene_id in beat_map:
+                        orig_beat = beat_map[sc.scene_id]
+                        if orig_beat.narration.strip():
+                            sc.narration = orig_beat.narration
+                            sc.duration = max(sc.duration, orig_beat.target_duration)
+                return plan
         except Exception as exc:
             print(f"ScenePlanner error: {exc}")
 

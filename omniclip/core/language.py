@@ -74,10 +74,17 @@ def _voices() -> list[dict]:
 
 def voices_for(code: str) -> list[str]:
     code = normalise(code)
-    return sorted(
+    matched = sorted(
         v["ShortName"] for v in _voices()
         if v.get("Locale", "").lower().startswith(f"{code}-")
     )
+    if not matched and code == "pa":
+        # Punjabi fallback to South Asian neural models
+        matched = sorted(
+            v["ShortName"] for v in _voices()
+            if v.get("Locale", "").lower().startswith(("ur-", "hi-"))
+        )
+    return matched
 
 
 def pick_voice(code: str, fallback: str = "en-US-AndrewNeural") -> str:

@@ -15,3 +15,7 @@ scratch/
 *.jpeg
 *.png
 *.webp
+build/
+dist/
+dist_single/
+*.spec
